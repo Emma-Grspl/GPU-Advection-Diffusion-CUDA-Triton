@@ -8,6 +8,7 @@ import sys
 import tempfile
 
 import numpy as np
+import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(
     0,
     str(ROOT),
+)
+
+from pytorch.stencil import (
+    advance_scalar_torch,
 )
 
 from reference.numpy.legacy_stencil import (
@@ -327,6 +332,45 @@ def run_numpy(
     return current
 
 
+
+def run_torch(
+    case: Case,
+    phi: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+):
+    current = torch.from_numpy(
+        phi.copy()
+    )
+
+    velocity_u = torch.from_numpy(
+        u.copy()
+    )
+
+    velocity_v = torch.from_numpy(
+        v.copy()
+    )
+
+    for _ in range(case.steps):
+        current = advance_scalar_torch(
+            current,
+            velocity_u,
+            velocity_v,
+            nx=case.nx,
+            ny=case.ny,
+            dx=case.dx,
+            dy=case.dy,
+            diffusivity=case.diffusivity,
+            dt=case.dt,
+        )
+
+    return (
+        current
+        .detach()
+        .cpu()
+        .numpy()
+    )
+
 def write_cpp_input(
     path: Path,
     phi: np.ndarray,
@@ -568,10 +612,31 @@ def main():
             v,
         )
 
-        relative_l2, max_abs = (
+        torch_result = run_torch(
+            case,
+            phi,
+            u,
+            v,
+        )
+
+        cpp_relative_l2, cpp_max_abs = (
             error_metrics(
                 numpy_result,
                 cpp_result,
+            )
+        )
+
+        torch_relative_l2, torch_max_abs = (
+            error_metrics(
+                numpy_result,
+                torch_result,
+            )
+        )
+
+        cpp_torch_relative_l2, cpp_torch_max_abs = (
+            error_metrics(
+                cpp_result,
+                torch_result,
             )
         )
 
@@ -589,9 +654,19 @@ def main():
             )
         )
 
+        cpp_passed = (
+            cpp_relative_l2 <= rel_tol
+            and cpp_max_abs <= abs_tol
+        )
+
+        torch_passed = (
+            torch_relative_l2 <= rel_tol
+            and torch_max_abs <= abs_tol
+        )
+
         passed = (
-            relative_l2 <= rel_tol
-            and max_abs <= abs_tol
+            cpp_passed
+            and torch_passed
         )
 
         state = (
@@ -626,13 +701,33 @@ def main():
         )
 
         print(
-            f"  rel L2     : "
-            f"{relative_l2:.6e}"
+            f"  C++ rel L2 : "
+            f"{cpp_relative_l2:.6e}"
         )
 
         print(
-            f"  max abs    : "
-            f"{max_abs:.6e}"
+            f"  C++ max abs: "
+            f"{cpp_max_abs:.6e}"
+        )
+
+        print(
+            f"  PT rel L2  : "
+            f"{torch_relative_l2:.6e}"
+        )
+
+        print(
+            f"  PT max abs : "
+            f"{torch_max_abs:.6e}"
+        )
+
+        print(
+            f"  C++/PT L2  : "
+            f"{cpp_torch_relative_l2:.6e}"
+        )
+
+        print(
+            f"  C++/PT max : "
+            f"{cpp_torch_max_abs:.6e}"
         )
 
         if not passed:

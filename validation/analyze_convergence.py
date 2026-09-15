@@ -7,6 +7,7 @@ import sys
 import tempfile
 
 import numpy as np
+import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(
     0,
     str(ROOT),
+)
+
+from pytorch.stencil import (
+    advance_scalar_torch,
 )
 
 from reference.numpy.legacy_stencil import (
@@ -174,6 +179,52 @@ def run_numpy(
     return current
 
 
+
+def run_torch(
+    phi: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    *,
+    nx: int,
+    ny: int,
+    dx: float,
+    dy: float,
+    diffusivity: float,
+    dt: float,
+    steps: int,
+):
+    current = torch.from_numpy(
+        phi.copy()
+    )
+
+    velocity_u = torch.from_numpy(
+        u.copy()
+    )
+
+    velocity_v = torch.from_numpy(
+        v.copy()
+    )
+
+    for _ in range(steps):
+        current = advance_scalar_torch(
+            current,
+            velocity_u,
+            velocity_v,
+            nx=nx,
+            ny=ny,
+            dx=dx,
+            dy=dy,
+            diffusivity=diffusivity,
+            dt=dt,
+        )
+
+    return (
+        current
+        .detach()
+        .cpu()
+        .numpy()
+    )
+
 def relative_l2(
     candidate: np.ndarray,
     reference: np.ndarray,
@@ -248,6 +299,7 @@ def spatial_convergence():
 
     previous_numpy_error = None
     previous_cpp_error = None
+    previous_torch_error = None
 
     for n in sizes:
         nx = n
@@ -359,6 +411,19 @@ def spatial_convergence():
             steps=1,
         )
 
+        torch_result = run_torch(
+            phi,
+            u,
+            v,
+            nx=nx,
+            ny=ny,
+            dx=dx,
+            dy=dy,
+            diffusivity=diffusivity,
+            dt=dt,
+            steps=1,
+        )
+
         numerical_numpy = (
             (
                 numpy_result
@@ -373,6 +438,17 @@ def spatial_convergence():
         numerical_cpp = (
             (
                 cpp_result
+                - phi
+            )
+            / dt
+        ).reshape(
+            ny,
+            nx,
+        )
+
+        numerical_torch = (
+            (
+                torch_result
                 - phi
             )
             / dt
@@ -409,6 +485,12 @@ def spatial_convergence():
             ]
         )
 
+        torch_interior = (
+            numerical_torch[
+                interior
+            ]
+        )
+
         numpy_error = relative_l2(
             numpy_interior,
             exact_interior,
@@ -419,8 +501,18 @@ def spatial_convergence():
             exact_interior,
         )
 
+        torch_error = relative_l2(
+            torch_interior,
+            exact_interior,
+        )
+
         backend_error = relative_l2(
             cpp_interior,
+            numpy_interior,
+        )
+
+        torch_backend_error = relative_l2(
+            torch_interior,
             numpy_interior,
         )
 
@@ -442,23 +534,38 @@ def spatial_convergence():
             )
         )
 
+        torch_order = (
+            None
+            if previous_torch_error is None
+            else observed_order(
+                previous_torch_error,
+                torch_error,
+            )
+        )
+
         rows.append({
             "n": n,
             "dx": dx,
             "dy": dy,
             "numpy_error": numpy_error,
             "cpp_error": cpp_error,
+            "torch_error": torch_error,
             "backend_error": backend_error,
+            "torch_backend_error": torch_backend_error,
             "numpy_order": numpy_order,
             "cpp_order": cpp_order,
+            "torch_order": torch_order,
         })
 
         print(
             f"N={n:3d} | "
             f"E_np={numpy_error:.6e} | "
             f"E_cpp={cpp_error:.6e} | "
+            f"E_pt={torch_error:.6e} | "
             f"p_cpp="
-            f"{'-' if cpp_order is None else f'{cpp_order:.6f}'}"
+            f"{'-' if cpp_order is None else f'{cpp_order:.6f}'} | "
+            f"p_pt="
+            f"{'-' if torch_order is None else f'{torch_order:.6f}'}"
         )
 
         previous_numpy_error = (
@@ -469,33 +576,68 @@ def spatial_convergence():
             cpp_error
         )
 
-    orders = [
+        previous_torch_error = (
+            torch_error
+        )
+
+    cpp_orders = [
         row["cpp_order"]
         for row in rows
         if row["cpp_order"]
         is not None
     ]
 
-    asymptotic_orders = (
-        orders[-3:]
+    torch_orders = [
+        row["torch_order"]
+        for row in rows
+        if row["torch_order"]
+        is not None
+    ]
+
+    cpp_mean_order = float(
+        np.mean(
+            cpp_orders[-3:]
+        )
     )
 
-    mean_order = float(
+    torch_mean_order = float(
         np.mean(
-            asymptotic_orders
+            torch_orders[-3:]
         )
+    )
+
+    max_torch_backend_error = max(
+        row["torch_backend_error"]
+        for row in rows
     )
 
     passed = (
         1.90
-        <= mean_order
+        <= cpp_mean_order
         <= 2.10
+        and
+        1.90
+        <= torch_mean_order
+        <= 2.10
+        and
+        max_torch_backend_error
+        <= 5.0e-14
     )
 
     print()
     print(
-        f"Asymptotic mean order: "
-        f"{mean_order:.6f}"
+        f"C++ asymptotic order   : "
+        f"{cpp_mean_order:.6f}"
+    )
+
+    print(
+        f"PyTorch asymptotic order: "
+        f"{torch_mean_order:.6f}"
+    )
+
+    print(
+        f"Max PyTorch/NumPy error : "
+        f"{max_torch_backend_error:.6e}"
     )
 
     print(
@@ -529,9 +671,12 @@ def spatial_convergence():
                 "dy",
                 "numpy_error",
                 "cpp_error",
+                "torch_error",
                 "backend_error",
+                "torch_backend_error",
                 "numpy_order",
                 "cpp_order",
+                "torch_order",
             ],
         )
 
@@ -679,6 +824,7 @@ def temporal_convergence():
 
     previous_numpy_error = None
     previous_cpp_error = None
+    previous_torch_error = None
 
     for steps in step_counts:
         dt = (
@@ -712,6 +858,19 @@ def temporal_convergence():
             steps=steps,
         )
 
+        torch_result = run_torch(
+            phi0,
+            u,
+            v,
+            nx=nx,
+            ny=ny,
+            dx=dx,
+            dy=dy,
+            diffusivity=diffusivity,
+            dt=dt,
+            steps=steps,
+        )
+
         numpy_interior = (
             numpy_result.reshape(
                 ny,
@@ -721,6 +880,13 @@ def temporal_convergence():
 
         cpp_interior = (
             cpp_result.reshape(
+                ny,
+                nx,
+            )[1:-1, 1:-1]
+        )
+
+        torch_interior = (
+            torch_result.reshape(
                 ny,
                 nx,
             )[1:-1, 1:-1]
@@ -736,8 +902,18 @@ def temporal_convergence():
             exact,
         )
 
+        torch_error = relative_l2(
+            torch_interior,
+            exact,
+        )
+
         backend_error = relative_l2(
             cpp_interior,
+            numpy_interior,
+        )
+
+        torch_backend_error = relative_l2(
+            torch_interior,
             numpy_interior,
         )
 
@@ -759,6 +935,15 @@ def temporal_convergence():
             )
         )
 
+        torch_order = (
+            None
+            if previous_torch_error is None
+            else observed_order(
+                previous_torch_error,
+                torch_error,
+            )
+        )
+
         c_diff = (
             diffusivity
             * dt
@@ -774,9 +959,12 @@ def temporal_convergence():
             "c_diff": c_diff,
             "numpy_error": numpy_error,
             "cpp_error": cpp_error,
+            "torch_error": torch_error,
             "backend_error": backend_error,
+            "torch_backend_error": torch_backend_error,
             "numpy_order": numpy_order,
             "cpp_order": cpp_order,
+            "torch_order": torch_order,
         })
 
         print(
@@ -784,8 +972,11 @@ def temporal_convergence():
             f"dt={dt:.6e} | "
             f"C_diff={c_diff:.6f} | "
             f"E_cpp={cpp_error:.6e} | "
+            f"E_pt={torch_error:.6e} | "
             f"p_cpp="
-            f"{'-' if cpp_order is None else f'{cpp_order:.6f}'}"
+            f"{'-' if cpp_order is None else f'{cpp_order:.6f}'} | "
+            f"p_pt="
+            f"{'-' if torch_order is None else f'{torch_order:.6f}'}"
         )
 
         previous_numpy_error = (
@@ -796,33 +987,68 @@ def temporal_convergence():
             cpp_error
         )
 
-    orders = [
+        previous_torch_error = (
+            torch_error
+        )
+
+    cpp_orders = [
         row["cpp_order"]
         for row in rows
         if row["cpp_order"]
         is not None
     ]
 
-    asymptotic_orders = (
-        orders[-3:]
+    torch_orders = [
+        row["torch_order"]
+        for row in rows
+        if row["torch_order"]
+        is not None
+    ]
+
+    cpp_mean_order = float(
+        np.mean(
+            cpp_orders[-3:]
+        )
     )
 
-    mean_order = float(
+    torch_mean_order = float(
         np.mean(
-            asymptotic_orders
+            torch_orders[-3:]
         )
+    )
+
+    max_torch_backend_error = max(
+        row["torch_backend_error"]
+        for row in rows
     )
 
     passed = (
         0.95
-        <= mean_order
+        <= cpp_mean_order
         <= 1.10
+        and
+        0.95
+        <= torch_mean_order
+        <= 1.10
+        and
+        max_torch_backend_error
+        <= 5.0e-12
     )
 
     print()
     print(
-        f"Asymptotic mean order: "
-        f"{mean_order:.6f}"
+        f"C++ asymptotic order   : "
+        f"{cpp_mean_order:.6f}"
+    )
+
+    print(
+        f"PyTorch asymptotic order: "
+        f"{torch_mean_order:.6f}"
+    )
+
+    print(
+        f"Max PyTorch/NumPy error : "
+        f"{max_torch_backend_error:.6e}"
     )
 
     print(
@@ -851,9 +1077,12 @@ def temporal_convergence():
                 "c_diff",
                 "numpy_error",
                 "cpp_error",
+                "torch_error",
                 "backend_error",
+                "torch_backend_error",
                 "numpy_order",
                 "cpp_order",
+                "torch_order",
             ],
         )
 

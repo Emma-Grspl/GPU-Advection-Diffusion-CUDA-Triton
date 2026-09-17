@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(
+    0,
+    str(ROOT),
+)
 
 from validation.run_robustness_suite import (
     CASES,
@@ -14,8 +23,6 @@ from validation.run_robustness_suite import (
     write_cpp_input,
 )
 
-
-ROOT = Path(__file__).resolve().parents[1]
 
 CUDA_EXECUTABLE = (
     ROOT

@@ -94,3 +94,88 @@ target_link_libraries(
     PRIVATE
         stencil_cpu
 )
+
+
+# ------------------------------------------------------------
+# Optional CUDA backend
+# ------------------------------------------------------------
+
+option(
+    STENCIL_ENABLE_CUDA
+    "Build the CUDA stencil backend"
+    OFF
+)
+
+if(STENCIL_ENABLE_CUDA)
+    include(CheckLanguage)
+
+    check_language(CUDA)
+
+    if(NOT CMAKE_CUDA_COMPILER)
+        message(
+            FATAL_ERROR
+            "STENCIL_ENABLE_CUDA=ON but no CUDA compiler was found."
+        )
+    endif()
+
+    enable_language(CUDA)
+
+    find_package(
+        CUDAToolkit
+        REQUIRED
+    )
+
+    set(
+        CMAKE_CUDA_STANDARD
+        20
+    )
+
+    set(
+        CMAKE_CUDA_STANDARD_REQUIRED
+        ON
+    )
+
+    add_library(
+        stencil_cuda
+        STATIC
+        cuda/src/AdvectionDiffusionCuda.cu
+        cuda/src/CudaStencilExecutor.cu
+    )
+
+    target_include_directories(
+        stencil_cuda
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/cuda/include
+    )
+
+    target_link_libraries(
+        stencil_cuda
+        PUBLIC
+            CUDA::cudart
+    )
+
+    set_target_properties(
+        stencil_cuda
+        PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+    )
+
+    add_executable(
+        cuda_stencil_cli
+        cuda/src/stencil_cuda_cli.cu
+    )
+
+    target_link_libraries(
+        cuda_stencil_cli
+        PRIVATE
+            stencil_cuda
+    )
+
+    if(NOT CMAKE_CUDA_ARCHITECTURES)
+        message(
+            STATUS
+            "CMAKE_CUDA_ARCHITECTURES was not set; "
+            "the CUDA compiler default will be used."
+        )
+    endif()
+endif()

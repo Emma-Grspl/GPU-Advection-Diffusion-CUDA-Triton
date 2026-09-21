@@ -109,6 +109,50 @@ void CudaStencilExecutor::advance(
 }
 
 
+void CudaStencilExecutor::advance_shared(
+    const CudaParameters& parameters,
+    const std::size_t steps,
+    const CudaLaunchConfig& launch
+)
+{
+    if (
+        parameters.nx != nx_
+        || parameters.ny != ny_
+    )
+    {
+        throw std::invalid_argument(
+            "Executor grid size and CUDA parameters differ."
+        );
+    }
+
+    if (steps == 0)
+    {
+        throw std::invalid_argument(
+            "steps must be >= 1."
+        );
+    }
+
+    for (
+        std::size_t step = 0;
+        step < steps;
+        ++step
+    )
+    {
+        launch_advection_diffusion_shared_fp64(
+            current_phi(),
+            u_.data(),
+            v_.data(),
+            next_phi(),
+            parameters,
+            launch
+        );
+
+        current_is_a_ =
+            !current_is_a_;
+    }
+}
+
+
 void CudaStencilExecutor::synchronize() const
 {
     STENCIL_CUDA_CHECK(

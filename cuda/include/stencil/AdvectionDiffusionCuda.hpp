@@ -38,4 +38,15 @@ void launch_advection_diffusion_fp64(
     cudaStream_t stream = nullptr
 );
 
+
+void launch_advection_diffusion_shared_fp64(
+    const double* phi_old,
+    const double* u,
+    const double* v,
+    double* phi_new,
+    const CudaParameters& parameters,
+    const CudaLaunchConfig& launch_config,
+    cudaStream_t stream = nullptr
+);
+
 }  // namespace stencil

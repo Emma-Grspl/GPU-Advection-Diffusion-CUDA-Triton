@@ -1,0 +1,13 @@
+CUDA backend validation
+=======================
+[PASS] constant_field               L2=0.000000e+00 Linf=0.000000e+00
+[PASS] pure_diffusion               L2=1.176256e-17 Linf=1.110223e-16
+[PASS] pure_advection_one_step      L2=0.000000e+00 Linf=0.000000e+00
+[PASS] combined_anisotropic         L2=4.472049e-18 Linf=5.551115e-17
+[PASS] irregular_37x51              L2=4.865790e-18 Linf=1.110223e-16
+[PASS] random_seed_0                L2=0.000000e+00 Linf=0.000000e+00
+[PASS] random_seed_42               L2=7.021410e-18 Linf=1.110223e-16
+[PASS] multistep_1000               L2=6.351284e-18 Linf=5.551115e-17
+
+Passed: 8/8
+CUDA VALIDATION RESULT: PASS

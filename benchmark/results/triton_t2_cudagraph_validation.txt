@@ -1,0 +1,5 @@
+CUDA Graph validation
+[PASS] 37x51 steps=1000 graph_steps=100 exact=True rel_L2=0.000000e+00 Linf=0.000000e+00
+[PASS] 512x512 steps=1000 graph_steps=100 exact=True rel_L2=0.000000e+00 Linf=0.000000e+00
+
+TRITON T2 CUDA GRAPH VALIDATION: PASS

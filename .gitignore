@@ -4,3 +4,16 @@ __pycache__/
 build/
 .DS_Store
 build-cuda/
+
+# Local benchmark binaries
+benchmark/benchmark_cpp_cpu
+
+# Raw Nsight Systems profiling artifacts
+benchmark/results/*.nsys-rep
+benchmark/results/*.sqlite
+benchmark/results/*.qdrep
+benchmark/results/*.qdstrm
+profiling/nsys/*.nsys-rep
+profiling/nsys/*.sqlite
+profiling/nsys/*.qdrep
+profiling/nsys/*.qdstrm

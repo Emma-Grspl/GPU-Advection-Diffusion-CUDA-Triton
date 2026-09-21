@@ -171,6 +171,72 @@ if(STENCIL_ENABLE_CUDA)
             stencil_cuda
     )
 
+    add_executable(
+        benchmark_cuda_c0
+        cuda/src/benchmark_cuda_c0.cu
+    )
+
+    target_link_libraries(
+        benchmark_cuda_c0
+        PRIVATE
+            stencil_cuda
+    )
+
+    add_executable(
+        profile_cuda_c0
+        cuda/src/profile_cuda_c0.cu
+    )
+
+    target_link_libraries(
+        profile_cuda_c0
+        PRIVATE
+            stencil_cuda
+    )
+
+    add_executable(
+        benchmark_cuda_blocks
+        cuda/src/benchmark_cuda_blocks.cu
+    )
+
+    target_link_libraries(
+        benchmark_cuda_blocks
+        PRIVATE
+            stencil_cuda
+    )
+
+    add_executable(
+        validate_cuda_shared
+        cuda/src/validate_cuda_shared.cu
+    )
+
+    target_link_libraries(
+        validate_cuda_shared
+        PRIVATE
+            stencil_cuda
+    )
+
+    add_executable(
+        benchmark_cuda_c0_vs_c2
+        cuda/src/benchmark_cuda_c0_vs_c2.cu
+    )
+
+    target_link_libraries(
+        benchmark_cuda_c0_vs_c2
+        PRIVATE
+            stencil_cuda
+    )
+
+    add_executable(
+        profile_cuda_c2
+        cuda/src/profile_cuda_c2.cu
+    )
+
+    target_link_libraries(
+        profile_cuda_c2
+        PRIVATE
+            stencil_cuda
+    )
+
     if(NOT CMAKE_CUDA_ARCHITECTURES)
         message(
             STATUS

@@ -33,6 +33,13 @@ public:
     );
 
 
+    void advance_shared(
+        const CudaParameters& parameters,
+        std::size_t steps,
+        const CudaLaunchConfig& launch = {}
+    );
+
+
     void synchronize() const;
 
 

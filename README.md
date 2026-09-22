@@ -1,827 +1,420 @@
-# GPU Advection–Diffusion — CUDA & Triton Optimization Study
+# GPU Advection Diffusion with CUDA and Triton
 
-GPU optimization study of a real **2-D advection–diffusion finite-difference stencil** extracted from a validated C++ reactive-flow solver.
+This project studies how a real scientific stencil behaves on CPU and GPU.
+
+The stencil comes from my C++ counterflow combustion solver and solves a 2D advection diffusion equation. The goal is simple: implement the same numerical update with several backends, check that they give the same result, then measure where the computation spends time.
 
 The project compares:
 
-* NumPy,
-* optimized single-threaded C++,
-* PyTorch eager,
-* hand-written CUDA C++,
-* Triton,
-* and Triton execution through CUDA Graphs.
+- NumPy
+- C++ on one CPU thread
+- PyTorch on GPU
+- CUDA C++
+- Triton
+- Triton with CUDA Graphs
 
-The objective is to identify where performance is lost, distinguish kernel efficiency from host-side overhead and evaluate which GPU optimizations actually improve the stencil.
+The main tests were run in FP64 on an NVIDIA Tesla V100 SXM2 16 GB.
 
 ---
 
-## Key findings
+## Main results
 
-* The hand-written CUDA FP64 stencil reaches approximately 25–26 GCell/s on an NVIDIA Tesla V100-SXM2.
-* For large grids, the Triton kernel reaches essentially the same throughput as the hand-written CUDA kernel.
-* At `512²`, eager Triton is limited primarily by host-side launch and dispatch overhead rather than GPU computation:
+The CUDA and Triton kernels reach about 25 to 26 GCell/s on large grids.
 
-  * intrinsic Triton kernel: approximately 10.2 µs,
-  * eager iterative timestep: approximately 36.1 µs.
-* Capturing 100 fixed-shape timesteps in a CUDA Graph reduces the amortized Triton cost at `512²` to 9.67 µs/timestep, corresponding to a 3.73× speedup over eager Triton execution.
-* CUDA thread-block tuning produces only small differences for sufficiently large grids.
-* Explicit shared-memory tiling does not improve this stencil on V100: halo loading and synchronization overhead outweigh the benefit of manually managed data reuse.
-* Numerical correctness was validated before performance optimization, including irregular grids and integrations up to 1000 timesteps.
+For grids from `1024 x 1024` upward, CUDA and Triton have almost the same performance.
+
+At `512 x 512`, Triton is slower in eager execution even though the GPU kernel itself is already fast. Nsight Systems showed that most of the extra time comes from launching many short kernels from Python.
+
+Using CUDA Graphs reduces the Triton cost at `512 x 512` from about 36.1 microseconds to 9.67 microseconds per timestep, which gives a 3.73x speedup.
+
+A second CUDA kernel using shared memory was also tested. It was slightly slower than the simpler CUDA kernel, so the simpler version was kept.
+
+![Backend time per step](assets/performance/final_backend_time_per_step.png)
+
+![Backend throughput](assets/performance/final_backend_throughput.png)
+
+![GPU speedup over CPU](assets/performance/final_backend_speedup_vs_cpu.png)
 
 ---
 
 ## Numerical problem
 
-The benchmark solves the two-dimensional advection–diffusion equation
+The code solves the 2D advection diffusion equation
 
-$$ \frac{\partial \phi}{\partial t} + u\frac{\partial \phi}{\partial x} + v\frac{\partial \phi}{\partial y} = D\nabla^2\phi,$$
+$$ \frac{\partial \phi}{\partial t} + u\frac{\partial \phi}{\partial x} + v\frac{\partial \phi}{\partial y} = D\nabla^2\phi.$$
 
-where:
+Here:
 
-* $\phi(x,y,t)$ is the transported scalar,
-* $u(x,y)$ and $v(x,y)$ are prescribed velocity components,
-* $D$ is the diffusion coefficient.
+- $\phi(x,y,t)$ is the transported scalar field
+- $u(x,y)$ and $v(x,y)$ are the velocity components
+- $D$ is the diffusion coefficient
 
-The interior update is based on centered finite differences:
+The same centered finite difference update is used in every implementation.
 
-$$ \phi_{i,j}^{n+1} = \phi_{i,j}^{n} - \Delta t \left[ u_{i,j} \frac{\phi_{i+1,j}^{n}-\phi_{i-1,j}^{n}}{2\Delta x} +
-v_{i,j} \frac{\phi_{i,j+1}^{n}-\phi_{i,j-1}^{n}}{2\Delta y} \right] + D\Delta t \left[ \frac{ \phi_{i+1,j}^{n} -
-2\phi_{i,j}^{n} + \phi_{i-1,j}^{n}}{\Delta x^2} + \frac{\phi_{i,j+1}^{n}-2\phi_{i,j}^{n}+\phi_{i,j-1}^{n}}{\Delta y^2}\right].$$
+All backends use:
 
-The implementation contract is identical across backends:
+- FP64 arithmetic for the main study
+- row major storage
+- contiguous x direction memory layout
+- separate old and new state arrays
+- ping pong time integration
+- fixed boundary values
+- independent `Nx`, `Ny`, `dx`, and `dy`
 
-* independent `Nx` and `Ny`,
-* independent `dx` and `dy`,
-* FP64 arithmetic for the main study,
-* flattened row-major storage,
-* x-index contiguous in memory,
-* separate old and new state arrays,
-* ping-pong time integration,
-* no in-place stencil update,
-* boundary values preserved exactly.
-
-The stencil was extracted from a validated reactive-flow solver rather than designed solely as a synthetic GPU benchmark.
+This makes the performance comparison meaningful because every backend solves the same numerical problem.
 
 ---
 
 ## Implementations
 
-| Backend       | Role                                                    |
-| ------------- | ------------------------------------------------------- |
-| NumPy         | Numerical reference                                     |
-| C++ CPU       | Optimized single-threaded CPU baseline                  |
-| PyTorch eager | High-level GPU tensor baseline                          |
-| CUDA C0       | Fused global-memory CUDA kernel                         |
-| CUDA C1       | CUDA block-size tuning study                            |
-| CUDA C2       | Explicit shared-memory tiling experiment                |
-| Triton T0     | Baseline fused Triton kernel                            |
-| Triton T1     | `BLOCK_SIZE` / `num_warps` tuning                       |
-| Triton T2     | CUDA Graph replay to reduce host-side dispatch overhead |
+| Backend | Purpose |
+| --- | --- |
+| NumPy | Numerical reference |
+| C++ CPU | CPU performance reference |
+| PyTorch | Standard GPU tensor implementation |
+| CUDA C0 | Main CUDA kernel |
+| CUDA C1 | CUDA block size study |
+| CUDA C2 | Shared memory experiment |
+| Triton T0 | First Triton kernel |
+| Triton T1 | Tuned Triton kernel |
+| Triton T2 | Triton with CUDA Graphs |
 
 ---
 
 ## Numerical validation
 
-Correctness was established before performance optimization.
+Performance was measured only after checking correctness.
 
-### CUDA
+The CUDA implementation was compared with the NumPy reference on:
 
-The CUDA implementation was compared against the NumPy reference on multiple cases, including:
+- constant fields
+- diffusion only cases
+- advection only cases
+- combined advection and diffusion
+- irregular grid sizes
+- anisotropic grids
+- random initial conditions
+- integrations up to 1000 timesteps
 
-* constant fields,
-* diffusion-only problems,
-* advection-only problems,
-* combined advection–diffusion,
-* anisotropic grids,
-* irregular grid sizes,
-* random initial conditions,
-* long integrations up to 1000 timesteps.
+The CUDA results stayed at FP64 numerical precision.
 
-Representative errors remained at or near FP64 machine precision.
+The Triton implementation was also checked against the reference. After using `tl.float64` for runtime scalar coefficients, the maximum error remained around machine precision.
 
-The global-memory C0 and explicit shared-memory C2 kernels were also compared directly on an irregular `37 × 51` grid for:
-
-* 1 timestep,
-* 10 timesteps,
-* 1000 timesteps.
-
-They produced identical numerical results.
-
-### Triton
-
-The final FP64 Triton implementation was validated against the numerical reference.
-
-After explicitly typing runtime scalar coefficients as `tl.float64`:
-
-* 1 timestep: exact agreement,
-* 10 timesteps: $L_\infty \approx 1.39\times10^{-17}$,
-* 1000 timesteps: $L_\infty \approx 1.11\times10^{-16}$.
-
-### CUDA Graph replay
-
-CUDA Graph execution was compared directly against eager Triton for 1000 timesteps.
-
-Results were bitwise identical for:
-
-* `37 × 51`,
-* `512 × 512`.
-
-For both validation cases:
-
-```text
-rel_L2 = 0
-Linf   = 0
-```
+For 1000 timesteps, CUDA Graph execution and eager Triton produced identical results on both `37 x 51` and `512 x 512` grids.
 
 ---
 
-# Performance results
+## CUDA study
 
-GPU timings reported below exclude:
+### C0: simple CUDA kernel
 
-* initialization,
-* GPU allocation when appropriate,
-* host-device transfers,
-* file I/O.
+The first CUDA version uses one thread per grid cell and one fused kernel per timestep.
 
-Fields remain resident on the GPU throughout the timed iterative computation.
-
-The main GPU measurements were performed on:
-
-```text
-NVIDIA Tesla V100-SXM2-16GB
-Compute capability 7.0
-FP64
-```
-
----
-
-## Backend comparison
-
-![Final backend latency](assets/performance/final_backend_time_per_step.png)
-
-The optimized single-threaded C++ implementation provides the CPU reference baseline.
-
-PyTorch eager evaluates the stencil through multiple tensor operations, while CUDA C0 and Triton T1 fuse the complete stencil update into a single GPU kernel per timestep.
-
-For large grids, both the hand-written CUDA kernel and the Triton kernel sustain approximately **25–26 GCell/s** on the tested V100.
-
-![Final backend throughput](assets/performance/final_backend_throughput.png)
-
-![GPU speedup over CPU](assets/performance/final_backend_speedup_vs_cpu.png)
-
-For the largest tested grids, the custom GPU implementations provide roughly two orders of magnitude acceleration over the optimized single-threaded CPU baseline.
-
----
-
-# CUDA optimization study
-
-## C0 — global-memory baseline
-
-The first CUDA implementation uses:
-
-* one CUDA thread per grid cell,
-* flattened storage,
-* x-direction contiguous memory accesses,
-* global-memory stencil reads,
-* one fused kernel per timestep,
-* separate old/new device buffers,
-* ping-pong execution.
-
-The retained launch configuration is:
+The retained block size is:
 
 ```text
 blockDim = (32, 8)
-threads/block = 256
+threads per block = 256
 ```
 
-For sufficiently large grids, C0 reaches approximately:
+For large grids, this kernel reaches about 25 to 26 GCell/s on the V100.
+
+### C1: block size study
+
+Several block sizes were tested:
 
 ```text
-25–26 GCell/s
+8 x 8
+16 x 8
+32 x 8
+16 x 16
+32 x 16
 ```
 
-on the V100.
+For large grids, the performance difference stays below about one percent.
 
----
-
-## C1 — block-size tuning
-
-Several CUDA launch configurations were evaluated:
-
-```text
-8 × 8
-16 × 8
-32 × 8
-16 × 16
-32 × 16
-```
-
-Measurements were performed using an order-balanced cyclic benchmark to reduce thermal, frequency and ordering bias.
-
-For large grids, the differences between configurations remained below approximately one percent.
-
-The original
-
-```text
-32 × 8
-```
-
-configuration was therefore retained because it:
-
-* maps warps naturally onto contiguous x-direction accesses,
-* provides robust performance,
-* avoids introducing unnecessary configuration complexity.
+The original `32 x 8` configuration was kept because it gives stable performance and maps well to contiguous x direction memory access.
 
 ![CUDA block sweep](assets/performance/cuda_block_sweep.png)
 
----
+### C2: shared memory experiment
 
-## C2 — explicit shared-memory tiling
+A second CUDA kernel loads the stencil tile into shared memory before computing the update.
 
-A second CUDA implementation explicitly stages the scalar field in shared memory.
+For a `32 x 8` block, the shared tile contains a one cell halo around the block.
 
-For a `32 × 8` block, the shared-memory tile contains:
+The result was correct, but the kernel was slightly slower than C0.
 
-```text
-(32 + 2) × (8 + 2)
-= 34 × 10
-= 340 doubles
-```
+The extra work comes from:
 
-corresponding to:
+- loading the halo
+- extra indexing
+- synchronizing the block
 
-```text
-2720 bytes
-≈ 2.66 KiB per block
-```
+Nsight also showed that register use was not the cause of the slowdown.
 
-The tile includes a one-cell halo around the block.
-
-C2 was validated against C0 and produced identical results.
-
-However, C2 was consistently slower:
-
-* approximately 1–2% slower on large grids in the alternating benchmark,
-* approximately 2.8% higher kernel latency in the same-node Nsight comparison at `4096²`.
-
-Nsight also showed:
-
-```text
-C0: 30 registers/thread
-C2: 28 registers/thread
-```
-
-so the slowdown cannot be attributed simply to increased register pressure.
-
-The explicit shared-memory implementation introduces:
-
-* cooperative halo loading,
-* additional indexing,
-* a block-wide synchronization barrier.
-
-For this stencil on V100, these costs outweigh the benefit of explicit shared-memory reuse.
-
-The result is consistent with the hardware cache hierarchy already exploiting much of the spatial reuse present in the stencil.
-
-C2 is therefore retained as a documented **negative optimization experiment**, while C0 remains the final CUDA implementation.
+This experiment was kept in the repository because it is a useful negative result: shared memory does not automatically make a stencil faster.
 
 ---
 
-# Triton optimization study
+## Triton study
 
-The tested environment uses:
+The Triton tests use:
 
 ```text
 PyTorch 2.8.0
 Triton 3.4.0
-CUDA 12.8 runtime through the PyTorch environment
-NVIDIA Tesla V100-SXM2-16GB
-Compute capability 7.0
+CUDA 12.8 runtime
+NVIDIA Tesla V100 SXM2 16 GB
 ```
 
-A Triton smoke test successfully compiled and executed on the Jean Zay V100 environment.
+### T0: first Triton kernel
 
----
+The first Triton version computes the complete stencil in one kernel.
 
-## T0 — baseline Triton kernel
+A precision issue appeared during validation: Python scalar coefficients had to be explicitly converted to `tl.float64`.
 
-T0 maps each Triton program to a contiguous one-dimensional block of flattened grid indices.
+After this change, the Triton result matched the reference at machine precision.
 
-Each program computes:
+### T1: launch tuning
 
-* center value,
-* left/right neighbors,
-* top/bottom neighbors,
-* local velocity values,
-* centered advection,
-* centered diffusion,
-* final explicit time update.
-
-The complete stencil remains fused into a single kernel.
-
-The initial implementation exposed an important precision detail: runtime Python floating-point coefficients had to be explicitly typed as
-
-```python
-tl.float64
-```
-
-to maintain FP64 consistency with the state arrays.
-
-After this correction, the Triton implementation reproduced the reference solution to machine precision.
-
----
-
-## T1 — Triton launch tuning
-
-The following `(BLOCK_SIZE, num_warps)` configurations were tested:
+The following configurations were tested:
 
 ```text
-64   / 2
-128  / 4
-256  / 4
-256  / 8
-512  / 4
-512  / 8
-1024 / 8
+64   / 2 warps
+128  / 4 warps
+256  / 4 warps
+256  / 8 warps
+512  / 4 warps
+512  / 8 warps
+1024 / 8 warps
 ```
 
-The final retained configuration is:
+The retained configuration is:
 
 ```text
 BLOCK_SIZE = 256
 num_warps  = 8
 ```
 
-It provides the best overall behavior across the tested grid sizes.
+Representative results are:
 
-For large grids, its performance is essentially identical to CUDA C0.
+| Grid | CUDA C0 | Triton eager |
+| ---: | ---: | ---: |
+| `512 x 512` | 10.874 microseconds | 35.779 microseconds |
+| `1024 x 1024` | 44.125 microseconds | 44.142 microseconds |
+| `2048 x 2048` | 166.328 microseconds | 166.336 microseconds |
+| `4096 x 4096` | 652.171 microseconds | 653.707 microseconds |
 
-Representative same-GPU results are:
+From `1024 x 1024` upward, CUDA and Triton differ by less than about **0.3 percent**.
 
-|    Grid |    CUDA C0 | Triton eager |
-| ------: | ---------: | -----------: |
-|  `512²` |  10.874 µs |    35.779 µs |
-| `1024²` |  44.125 µs |    44.142 µs |
-| `2048²` | 166.328 µs |   166.336 µs |
-| `4096²` | 652.171 µs |   653.707 µs |
+### Nsight analysis at 512 x 512
 
-From `1024²` upward, the difference between CUDA and eager Triton is below approximately **0.3%**.
+The `512 x 512` case looked much slower in eager Triton, so it was profiled with Nsight Systems.
 
-The anomalous `512²` result was therefore investigated using Nsight Systems.
+The profile showed:
+
+```text
+Triton kernel median      about 10.21 microseconds
+CUDA launch call median   about  6.08 microseconds
+eager timestep            about 35.8 microseconds
+```
+
+The GPU kernel itself is already close to the CUDA kernel. The main problem is the time between short kernel launches.
+
+For larger grids, the kernel runs long enough that this launch cost becomes much less important.
 
 ---
 
-## Nsight diagnosis of the 512² Triton result
+## CUDA Graphs
 
-Nsight Systems showed that the Triton kernel itself is not responsible for the `512²` slowdown.
+The workload repeats the same kernel many times with fixed tensor shapes and fixed device memory addresses.
 
-At `512²`:
+This makes it a good candidate for CUDA Graphs.
 
-```text
-Triton kernel median       ≈ 10.21 µs
-cuLaunchKernelEx median    ≈  6.08 µs
-eager iterative timestep   ≈ 35.8 µs
-```
+The final version captures 100 timesteps and replays them as one graph.
 
-At `4096²`:
+| Grid | Triton eager | Triton with CUDA Graphs | Speedup |
+| ---: | ---: | ---: | ---: |
+| `512 x 512` | 36.104 microseconds | **9.674 microseconds** | **3.73x** |
+| `1024 x 1024` | 44.161 microseconds | **43.060 microseconds** | 1.026x |
+| `2048 x 2048` | 166.168 microseconds | **165.097 microseconds** | 1.006x |
+| `4096 x 4096` | 653.931 microseconds | **652.845 microseconds** | 1.002x |
 
-```text
-Triton kernel median       ≈ 645.63 µs
-cuLaunchKernelEx median    ≈   6.26 µs
-eager iterative timestep   ≈ 653.7 µs
-```
+At `512 x 512`, throughput rises from about **7.26 GCell/s** to about **27.10 GCell/s**.
 
-The intrinsic Triton kernel is therefore already comparable to the hand-written CUDA kernel.
+![Triton eager and CUDA Graph comparison](assets/performance/triton_graph_vs_eager_cuda.png)
 
-For short kernels, however, repeated execution from the Python/Triton loop leaves inter-launch gaps in the GPU timeline.
-
-For larger workloads, kernel execution is long enough for host-side submission overhead to become effectively hidden.
-
-This separates two distinct performance problems:
-
-1. **GPU kernel efficiency**
-2. **host-side orchestration overhead**
-
-T1 already solves the first problem.
-
-T2 targets the second.
+This confirms that the small grid slowdown came mainly from repeated launch overhead, not from a slow Triton GPU kernel.
 
 ---
 
-## T2 — CUDA Graph replay
+## What I learned
 
-The iterative workload has:
+This project gave me a practical view of several GPU performance topics:
 
-* fixed tensor shapes,
-* fixed device addresses,
-* fixed kernel structure,
-* repeated execution over many timesteps.
+- memory layout
+- CUDA thread blocks
+- GPU kernel fusion
+- block size tuning
+- shared memory
+- launch overhead
+- Nsight profiling
+- Triton kernel tuning
+- CUDA Graphs
 
-It is therefore well suited to CUDA Graph capture.
+The main result is that the best optimization depends on the problem size.
 
-T2 captures:
+For large grids, CUDA and Triton are limited mainly by the GPU work itself and reach almost the same throughput.
 
-```text
-100 timesteps
-```
+For smaller repeated workloads, launch overhead becomes important and CUDA Graphs can make a large difference.
 
-into one CUDA Graph and replays the graph instead of launching each Triton kernel independently from Python.
-
-An even graph length is used so that the ping-pong buffers return to the same state convention after every graph replay.
-
-### Performance
-
-|    Grid | Triton eager | Triton + CUDA Graph |   Speedup |
-| ------: | -----------: | ------------------: | --------: |
-|  `512²` |    36.104 µs |        **9.674 µs** | **3.73×** |
-| `1024²` |    44.161 µs |       **43.060 µs** |    1.026× |
-| `2048²` |   166.168 µs |      **165.097 µs** |    1.006× |
-| `4096²` |   653.931 µs |      **652.845 µs** |    1.002× |
-
-CUDA Graph timings are **amortized per timestep over graph replays containing 100 captured timesteps**.
-
-At `512²`, throughput increases from approximately:
-
-```text
-7.26 GCell/s
-```
-
-to:
-
-```text
-27.10 GCell/s
-```
-
-once repeated host-side dispatch is removed.
-
-For larger grids, the benefit becomes progressively smaller because GPU computation already dominates the timestep cost.
-
-![Triton CUDA Graph](assets/performance/triton_graph_vs_eager_cuda.png)
-
-The result confirms that the original small-grid Triton slowdown was caused primarily by orchestration overhead rather than poor generated GPU code.
+The shared memory experiment also showed that a more complex kernel is not always a faster kernel.
 
 ---
 
-# Final performance interpretation
+## Reproducing the results
 
-The experiments reveal three distinct regimes.
-
-### High-level eager execution
-
-PyTorch eager is convenient but performs the stencil through multiple tensor operations and intermediate memory traffic.
-
-For large grids, the custom fused kernels are approximately an order of magnitude faster.
-
-### Kernel-limited GPU execution
-
-For sufficiently large grids:
-
-```text
-CUDA C0 ≈ Triton T1
-```
-
-Both implementations reach approximately:
-
-```text
-25–26 GCell/s
-```
-
-on the tested V100.
-
-This shows that Triton can generate a stencil kernel with intrinsic performance comparable to hand-written CUDA for this workload.
-
-### Launch-limited execution
-
-For smaller workloads such as `512²`, the kernel itself becomes sufficiently short that host-side launch overhead is exposed.
-
-In that regime:
-
-```text
-Triton eager < CUDA
-```
-
-despite comparable intrinsic kernel performance.
-
-CUDA Graph replay removes most of this overhead:
-
-```text
-Triton Graph ≈ kernel-limited performance
-```
-
-The dominant optimization target therefore changes with problem size:
-
-* large grids → optimize the GPU kernel and memory behavior,
-* small repeated workloads → optimize kernel orchestration and launch overhead.
-
----
-
-# Reproducing the experiments
-
-## CUDA build
-
-A CUDA-enabled build directory is used for the native GPU implementation.
-
-Example workflow:
+### Build the CUDA code
 
 ```bash
 cmake -S . -B build-cuda
 cmake --build build-cuda -j
 ```
 
-The CUDA build targets include the validation, benchmarking and profiling executables described below.
-
----
-
-## CUDA validation
-
-Run the CUDA backend validation:
+### CUDA validation
 
 ```bash
 python validation/validate_cuda_backend.py
-```
-
-Run the C0/C2 shared-memory validation:
-
-```bash
 ./build-cuda/validate_cuda_shared
 ```
 
----
-
-## CUDA benchmarks
-
-Baseline C0:
+### CUDA benchmarks
 
 ```bash
 ./build-cuda/benchmark_cuda_c0
-```
-
-Block-size sweep:
-
-```bash
 ./build-cuda/benchmark_cuda_blocks
-```
-
-C0 vs C2:
-
-```bash
 ./build-cuda/benchmark_cuda_c0_vs_c2
 ```
 
----
-
-## CUDA profiling
-
-Dedicated profiling executables are provided for Nsight Systems:
+### CUDA profiling
 
 ```bash
 ./build-cuda/profile_cuda_c0
-```
-
-and:
-
-```bash
 ./build-cuda/profile_cuda_c2
 ```
 
-The raw Nsight report files are intentionally excluded from version control.
-
----
-
-## C++ CPU benchmark
-
-Compile or build the C++ benchmark and run:
+### C++ CPU benchmark
 
 ```bash
 benchmark/benchmark_cpp_cpu
 ```
 
-The CPU baseline is compiled with optimization enabled and is single-threaded.
-
-The term “single-threaded” is intentional: compiler auto-vectorization may still occur.
-
----
-
-## PyTorch eager benchmark
+### PyTorch benchmark
 
 ```bash
 python benchmark/benchmark_pytorch_eager.py
 ```
 
-This baseline uses:
-
-* FP64 CUDA tensors,
-* GPU-resident state,
-* PyTorch eager execution,
-* slicing-based stencil operations,
-* ping-pong state buffers.
-
-It is deliberately an eager baseline rather than a `torch.compile` benchmark.
-
----
-
-## Triton validation
-
-Baseline Triton validation:
+### Triton validation
 
 ```bash
 python triton_backend/validate_t0.py
 ```
 
----
-
-## Triton T0 benchmark
+### Triton benchmark and tuning
 
 ```bash
 python triton_backend/benchmark_t0.py
-```
-
----
-
-## Triton T1 tuning
-
-```bash
 python triton_backend/benchmark_t1_sweep.py
 ```
 
-The final retained configuration is:
-
-```text
-BLOCK_SIZE = 256
-num_warps  = 8
-```
-
----
-
-## Triton profiling
+### Triton profiling
 
 ```bash
 python triton_backend/profile_t1.py --n 512
-```
-
-or:
-
-```bash
 python triton_backend/profile_t1.py --n 4096
 ```
 
-These scripts are designed to be used with Nsight Systems to separate GPU kernel duration from host-side launch behavior.
-
----
-
-## Triton T2 validation
+### CUDA Graph validation and benchmark
 
 ```bash
 python triton_backend/validate_t2_cudagraph.py
-```
-
-Expected validation includes bitwise-identical eager and CUDA Graph trajectories after 1000 timesteps.
-
----
-
-## Triton T2 benchmark
-
-```bash
 python triton_backend/benchmark_t2_cudagraph.py
 ```
 
-This compares:
-
-```text
-Triton eager
-vs
-Triton + CUDA Graph replay
-```
-
-using identical numerical kernels.
-
 ---
 
-# Benchmark outputs
-
-Benchmark results are stored under:
-
-```text
-benchmark/results/
-```
-
-This directory includes:
-
-* raw CSV measurements,
-* validation summaries,
-* CUDA optimization summaries,
-* Triton optimization summaries,
-* final backend comparisons.
-
-Performance figures are stored under:
-
-```text
-assets/performance/
-```
-
----
-
-# Repository structure
+## Repository structure
 
 ```text
 GPU-Advection-Diffusion-CUDA-Triton/
-│
-├── cpu/
-│   ├── include/
-│   └── src/
-│
-├── cuda/
-│   ├── include/
-│   │   └── stencil/
-│   └── src/
-│       ├── AdvectionDiffusionCuda.cu
-│       ├── CudaStencilExecutor.cu
-│       ├── benchmark_cuda_c0.cu
-│       ├── benchmark_cuda_blocks.cu
-│       ├── benchmark_cuda_c0_vs_c2.cu
-│       ├── profile_cuda_c0.cu
-│       ├── profile_cuda_c2.cu
-│       └── validate_cuda_shared.cu
-│
-├── triton_backend/
-│   ├── stencil_t0.py
-│   ├── validate_t0.py
-│   ├── benchmark_t0.py
-│   ├── benchmark_t1_sweep.py
-│   ├── profile_t1.py
-│   ├── validate_t2_cudagraph.py
-│   └── benchmark_t2_cudagraph.py
-│
-├── benchmark/
-│   ├── benchmark_cpp_cpu.cpp
-│   ├── benchmark_pytorch_eager.py
-│   ├── run_end_to_end_bench.py
-│   ├── plot_performance.py
-│   ├── plot_final_backend_comparison.py
-│   └── results/
-│
-├── validation/
-│   └── results/
-│
-├── assets/
-│   └── performance/
-│
-├── CMakeLists.txt
-└── README.md
+|
+|-- cpu/
+|   |-- include/
+|   `-- src/
+|
+|-- cuda/
+|   |-- include/
+|   `-- src/
+|
+|-- triton_backend/
+|
+|-- benchmark/
+|   `-- results/
+|
+|-- validation/
+|   `-- results/
+|
+|-- assets/
+|   `-- performance/
+|
+|-- CMakeLists.txt
+`-- README.md
 ```
 
 ---
 
-# Experimental methodology
+## Project origin
 
-Several principles were maintained throughout the project.
+The stencil comes from my C++ counterflow combustion solver:
 
-### Correctness before optimization
+`Counterflow-Combustion-CPP`
 
-Every new implementation was validated before its performance was interpreted.
+That solver is itself a C++ version of my Master's project, originally written in Python.
 
-### Same numerical contract
+This GPU project therefore follows the same scientific problem across several stages:
 
-All backends implement the same spatial discretization, timestep update, boundary behavior and FP64 arithmetic.
+```text
+Python and NumPy
+        |
+        v
+C++ CPU
+        |
+        v
+CUDA C++
+        |
+        v
+Triton
+```
 
-### GPU-resident timing
-
-Performance measurements exclude initialization and transfers unless explicitly stated otherwise.
-
-### Same-GPU comparisons
-
-Direct CUDA/Triton comparisons use measurements obtained on the same V100 GPU model.
-
-### Negative results are retained
-
-Optimizations that do not improve performance are documented rather than discarded.
-
-The shared-memory C2 kernel is an example: it is numerically correct but slower than C0.
-
-### Profiling before interpretation
-
-The `512²` Triton result demonstrates why this matters.
-
-The end-to-end benchmark alone suggested that Triton was approximately three times slower than CUDA.
-
-Nsight Systems showed instead that the generated Triton GPU kernel was already comparable to CUDA and that the real bottleneck was host-side launch orchestration.
+The goal was not only to make the code faster, but also to understand where the time is spent and which GPU optimizations are useful for this stencil.
 
 ---
 
-# Final retained configurations
+## Final configurations
 
-## CUDA
+### CUDA
 
 ```text
 Precision       FP64
 Kernel          one fused stencil kernel per timestep
-Block size      32 × 8
+Block size      32 x 8
 Threads/block   256
-Memory strategy global-memory stencil reads
+Memory          global memory stencil reads
 ```
 
-## Triton
+### Triton
 
 ```text
 Precision       FP64
@@ -830,28 +423,18 @@ num_warps       8
 Kernel          one fused stencil kernel per timestep
 ```
 
-For fixed-shape repeated workloads, CUDA Graph replay can additionally be used to reduce host-side dispatch overhead.
+CUDA Graphs can be added when many short timesteps are repeated with fixed shapes.
 
 ---
 
-# Conclusion
+## Conclusion
 
-This project demonstrates that optimizing a GPU stencil requires more than replacing CPU code with a GPU kernel.
+The simple CUDA kernel reaches about 25 to 26 GCell/s on the V100.
 
-The experiments progressively isolate:
+Triton reaches almost the same performance on large grids.
 
-* high-level framework overhead,
-* memory-access behavior,
-* launch configuration,
-* shared-memory trade-offs,
-* generated-kernel efficiency,
-* host-side dispatch overhead.
+At `512 x 512`, the Triton kernel itself is already fast, but repeated Python launches add a large cost. CUDA Graphs remove most of that cost and reduce the timestep from about 36.1 microseconds to 9.67 microseconds.
 
-For this advection–diffusion stencil on NVIDIA V100:
+The shared memory version does not improve performance on this stencil, which is also an important result.
 
-* custom CUDA is dramatically faster than the optimized single-threaded CPU and PyTorch eager baselines,
-* explicit shared-memory tiling is not beneficial,
-* Triton generates a kernel with performance essentially equivalent to hand-written CUDA for sufficiently large workloads,
-* CUDA Graph replay removes the dominant eager-launch overhead for small repeated Triton kernels.
-
-The final result is a characterization of where performance is spent and which optimizations matter in each execution regime.
+Overall, this project shows how validation, profiling, CUDA, Triton and CUDA Graphs can be used together to understand and improve the performance of a real scientific stencil.

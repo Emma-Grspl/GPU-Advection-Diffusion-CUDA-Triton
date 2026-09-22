@@ -2,7 +2,7 @@
 
 This project studies how a real scientific stencil behaves on CPU and GPU.
 
-The stencil comes from my C++ counterflow combustion solver and solves a 2D advection diffusion equation. The goal is simple: implement the same numerical update with several backends, check that they give the same result, then measure where the computation spends time.
+The stencil comes from my C++ counterflow combustion solver (https://github.com/Emma-Grspl/Counterflow-Combustion-CPP) and solves a 2D advection diffusion equation. The goal is simple: implement the same numerical update with several backends, check that they give the same result, then measure where the computation spends time.
 
 The project compares:
 

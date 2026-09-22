@@ -11,7 +11,7 @@ The project compares:
 * Triton,
 * and Triton execution through CUDA Graphs.
 
-The objective is not only to compare raw execution times, but to identify **where performance is lost**, distinguish kernel efficiency from host-side overhead, and evaluate which GPU optimizations actually improve the stencil.
+The objective is to identify where performance is lost, distinguish kernel efficiency from host-side overhead and evaluate which GPU optimizations actually improve the stencil.
 
 ---
 
@@ -854,4 +854,4 @@ For this advection–diffusion stencil on NVIDIA V100:
 * Triton generates a kernel with performance essentially equivalent to hand-written CUDA for sufficiently large workloads,
 * CUDA Graph replay removes the dominant eager-launch overhead for small repeated Triton kernels.
 
-The final result is therefore not simply a backend ranking, but a characterization of **where performance is spent and which optimizations matter in each execution regime**.
+The final result is a characterization of where performance is spent and which optimizations matter in each execution regime.
